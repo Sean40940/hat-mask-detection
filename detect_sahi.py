@@ -199,12 +199,14 @@ def run(args):
 def parse_args():
     p = argparse.ArgumentParser(description="工廠安全偵測系統 (SAHI 增強版 v2 - 俯角優化)")
     p.add_argument(
-        "--model", default="best.pt",
-        help="帽子/口罩模型路徑 (.pt)，預設: best.pt",
+        "--model",
+        default=r"E:\USER\Documents\研究生\口罩辨識\帽子辨識\runs\hat_mask_v1\weights\best.pt",
+        help="帽子/口罩模型路徑 (.pt)",
     )
     p.add_argument(
-        "--source", default="0",
-        help="影片路徑或攝影機編號，預設: 0 (webcam)",
+        "--source",
+        default=r"E:\USER\Documents\研究生\口罩辨識\帽子辨識\Video\t1.mp4",
+        help="影片路徑或攝影機編號",
     )
     p.add_argument(
         "--output", default=None,
