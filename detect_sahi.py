@@ -1,15 +1,13 @@
 """
-工廠安全偵測系統 - SAHI 增強版 v2
+工廠安全偵測系統 - SAHI 增強版
 
-針對俯角監控攝影機優化：
-  - 不依賴 COCO 人員偵測（俯角下辨識率極差）
-  - 改以「帽子位置」代表工人位置
-  - 在帽子附近搜尋口罩，判斷是否合規
+SAHI 原理：把整張影像切成多個重疊小塊 → 各自推理 → 合併結果
+效果：大幅改善遠距離、小尺寸口罩的偵測率
 
 使用方式：
-  python detect_sahi.py --model best.pt --source factory.avi
-  python detect_sahi.py --model best.pt --source factory.avi --output result.mp4
-  python detect_sahi.py --model best.pt --source 0   # webcam
+  python detect_sahi.py
+  python detect_sahi.py --source factory.avi --output result.mp4
+  python detect_sahi.py --conf 0.2 --slice-size 256
 """
 
 import cv2
@@ -21,16 +19,11 @@ from datetime import datetime
 from sahi import AutoDetectionModel
 from sahi.predict import get_sliced_prediction
 
-# ── 類別定義（需與訓練時 data.yaml 的 names 順序一致）──────────
 HAT_ID  = 0
 MASK_ID = 1
 
-# ── 合規狀態顏色與標籤 ─────────────────────────────────────────
-STATUS = {
-    "ok":      {"color": (0, 200,   0), "label": "OK"},
-    "no_mask": {"color": (0, 140, 255), "label": "No Mask!"},
-}
-# ──────────────────────────────────────────────────────────────
+HAT_COLOR  = (30,  165, 255)  # 橙色
+MASK_COLOR = (220, 220,   0)  # 青色
 
 
 def get_device() -> str:
@@ -41,28 +34,22 @@ def get_device() -> str:
     return "cpu"
 
 
-def load_model(hatmask_path: str, device: str, conf: float):
-    if not Path(hatmask_path).exists():
-        raise FileNotFoundError(f"找不到模型檔案: {hatmask_path}")
+def load_model(model_path: str, device: str, conf: float):
+    if not Path(model_path).exists():
+        raise FileNotFoundError(f"找不到模型: {model_path}")
+    print(f"載入模型: {model_path}")
     return AutoDetectionModel.from_pretrained(
         model_type="ultralytics",
-        model_path=hatmask_path,
+        model_path=model_path,
         confidence_threshold=conf,
         device=device,
     )
 
 
-# ── SAHI 偵測 ──────────────────────────────────────────────────
-
-def sahi_detect(frame, sahi_model, slice_size: int, overlap: float):
-    """
-    SAHI 切片推理：將影像切成重疊小塊分別推理後合併。
-    切片越小，越容易偵測到遠距離的小口罩。
-    回傳 hats, masks: [[x1,y1,x2,y2,conf], ...]
-    """
+def sahi_detect(frame, model, slice_size: int, overlap: float):
+    """SAHI 切片推理，回傳 hats, masks: [[x1,y1,x2,y2,conf], ...]"""
     result = get_sliced_prediction(
-        frame,
-        sahi_model,
+        frame, model,
         slice_height=slice_size,
         slice_width=slice_size,
         overlap_height_ratio=overlap,
@@ -80,75 +67,27 @@ def sahi_detect(frame, sahi_model, slice_size: int, overlap: float):
     return hats, masks
 
 
-# ── 合規判斷（以帽子為人員位置基準）──────────────────────────────
+def draw_frame(frame, hats: list, masks: list) -> None:
+    for x1, y1, x2, y2, conf in hats:
+        cv2.rectangle(frame, (x1, y1), (x2, y2), HAT_COLOR, 2)
+        cv2.putText(frame, f"hat {conf:.2f}", (x1, y1 - 5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, HAT_COLOR, 1)
 
-def has_nearby_mask(hat_box: list, masks: list, search_ratio: float = 2.0) -> bool:
-    """
-    在帽子周圍搜尋口罩。
-    search_ratio: 搜尋半徑 = 帽子寬度 * search_ratio
-    俯角攝影機下口罩通常在帽子框的正下方或旁邊。
-    """
-    hx = (hat_box[0] + hat_box[2]) / 2
-    hy = (hat_box[1] + hat_box[3]) / 2
-    hat_w = hat_box[2] - hat_box[0]
-    hat_h = hat_box[3] - hat_box[1]
-    search_r = max(hat_w, hat_h) * search_ratio
-
-    for mask in masks:
-        mx = (mask[0] + mask[2]) / 2
-        my = (mask[1] + mask[3]) / 2
-        dist = ((mx - hx) ** 2 + (my - hy) ** 2) ** 0.5
-        if dist < search_r:
-            return True
-    return False
-
-
-# ── 繪圖 ───────────────────────────────────────────────────────
-
-def draw_frame(frame, hats: list, masks: list, search_ratio: float) -> tuple:
-    """
-    繪製偵測結果：
-      - 每個帽子 = 一個工人，檢查附近是否有口罩
-      - 綠框 = OK（帽子+口罩都有）
-      - 橘框 = No Mask!（有帽子但找不到口罩）
-      - 青色小框 = 偵測到的口罩位置
-    """
-    # 先畫口罩框（青色，細框）
     for x1, y1, x2, y2, conf in masks:
-        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 220, 220), 1)
-        cv2.putText(frame, f"mask {conf:.2f}", (x1, y1 - 4),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 220, 220), 1)
+        cv2.rectangle(frame, (x1, y1), (x2, y2), MASK_COLOR, 2)
+        cv2.putText(frame, f"mask {conf:.2f}", (x1, y1 - 5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, MASK_COLOR, 1)
 
-    violations = 0
-    for hat in hats:
-        x1, y1, x2, y2, conf = hat
-        compliant = has_nearby_mask(hat, masks, search_ratio)
-        status = "ok" if compliant else "no_mask"
-        color  = STATUS[status]["color"]
-        label  = STATUS[status]["label"]
-        if not compliant:
-            violations += 1
-
-        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-        cv2.putText(frame, f"{label} {conf:.2f}", (x1, y1 - 8),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
-
-    # HUD
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    workers = len(hats)
-    cv2.putText(frame, f"Workers: {workers}  Violations: {violations}",
-                (10, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
-    cv2.putText(frame, ts, (10, 58),
+    cv2.putText(frame, f"Hat: {len(hats)}  Mask: {len(masks)}",
+                (10, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+    cv2.putText(frame, ts, (10, 60),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, (180, 180, 180), 1)
 
-    return frame, violations
-
-
-# ── 主迴圈 ─────────────────────────────────────────────────────
 
 def run(args):
     device = get_device()
-    sahi_model = load_model(args.model, device, args.conf)
+    model  = load_model(args.model, device, args.conf)
 
     source = int(args.source) if args.source.isdigit() else args.source
     cap = cv2.VideoCapture(source)
@@ -166,23 +105,19 @@ def run(args):
         writer = cv2.VideoWriter(args.output, fourcc, fps, (width, height))
         print(f"輸出影片: {args.output}")
 
-    frame_no, total_violations = 0, 0
     print("開始偵測 (按 Q 鍵離開)...")
-
     while True:
         ret, frame = cap.read()
         if not ret:
             break
-        frame_no += 1
 
-        hats, masks  = sahi_detect(frame, sahi_model, args.slice_size, args.overlap)
-        frame, viols = draw_frame(frame, hats, masks, args.search_ratio)
-        total_violations += viols
+        hats, masks = sahi_detect(frame, model, args.slice_size, args.overlap)
+        draw_frame(frame, hats, masks)
 
         if writer:
             writer.write(frame)
 
-        cv2.imshow("Factory Safety Detection", frame)
+        cv2.imshow("Hat & Mask Detection", frame)
         if cv2.waitKey(1) & 0xFF == ord("q"):
             break
 
@@ -190,44 +125,19 @@ def run(args):
     if writer:
         writer.release()
     cv2.destroyAllWindows()
+    print("完成")
 
-    print(f"完成，共處理 {frame_no} 幀，累計違規 {total_violations} 次")
-
-
-# ── CLI 參數 ───────────────────────────────────────────────────
 
 def parse_args():
-    p = argparse.ArgumentParser(description="工廠安全偵測系統 (SAHI 增強版 v2 - 俯角優化)")
-    p.add_argument(
-        "--model",
-        default=r"E:\USER\Documents\研究生\口罩辨識\帽子辨識\runs\hat_mask_v1\weights\best.pt",
-        help="帽子/口罩模型路徑 (.pt)",
-    )
-    p.add_argument(
-        "--source",
-        default=r"E:\USER\Documents\研究生\口罩辨識\帽子辨識\Video\t1.mp4",
-        help="影片路徑或攝影機編號",
-    )
-    p.add_argument(
-        "--output", default=None,
-        help="儲存輸出影片路徑 (例如: result.mp4)",
-    )
-    p.add_argument(
-        "--conf", type=float, default=0.25,
-        help="偵測信心門檻，預設: 0.25（較低以提高口罩召回率）",
-    )
-    p.add_argument(
-        "--slice-size", type=int, default=320,
-        help="SAHI 切片大小，預設: 320（較小切片讓遠距口罩更清晰）",
-    )
-    p.add_argument(
-        "--overlap", type=float, default=0.3,
-        help="SAHI 切片重疊比例，預設: 0.3",
-    )
-    p.add_argument(
-        "--search-ratio", type=float, default=2.0,
-        help="在帽子周圍幾倍帽寬內搜尋口罩，預設: 2.0",
-    )
+    p = argparse.ArgumentParser(description="帽子/口罩偵測 (SAHI 增強版)")
+    p.add_argument("--model",
+        default=r"E:\USER\Documents\研究生\口罩辨識\帽子辨識\runs\hat_mask_v1\weights\best.pt")
+    p.add_argument("--source",
+        default=r"E:\USER\Documents\研究生\口罩辨識\帽子辨識\Video\t1.mp4")
+    p.add_argument("--output",      default=None,  help="輸出影片路徑")
+    p.add_argument("--conf",        type=float, default=0.25, help="信心門檻 (預設 0.25)")
+    p.add_argument("--slice-size",  type=int,   default=320,  help="SAHI 切片大小 (預設 320)")
+    p.add_argument("--overlap",     type=float, default=0.3,  help="SAHI 重疊比例 (預設 0.3)")
     return p.parse_args()
 
 
