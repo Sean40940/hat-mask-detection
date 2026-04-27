@@ -1,0 +1,4 @@
+train: e:\USER\Documents\研究生\口罩辨識\帽子辨識\hat_only_merged\train\images
+val: e:\USER\Documents\研究生\口罩辨識\帽子辨識\hat_only_merged\valid\images
+nc: 1
+names: ['hat']

@@ -1,0 +1,5 @@
+train: E:\USER\Documents\研究生\口罩辨識\帽子辨識\train\images
+val: E:\USER\Documents\研究生\口罩辨識\帽子辨識\valid\images
+
+nc: 2
+names: ['hat', 'mask']
